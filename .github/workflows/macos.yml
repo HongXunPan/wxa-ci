@@ -1,0 +1,77 @@
+name: Intel 受控构建
+run-name: 受控构建 · ${{ inputs.delivery_kind }} · ${{ inputs.source_sha }}
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 私有应用仓已合并 main 的完整提交 SHA
+        required: true
+        type: string
+      delivery_kind:
+        description: 交付档位；研究配套仅发布密文，不等于安装或读取批准
+        required: true
+        type: choice
+        default: offline
+        options:
+          - offline
+          - research
+
+permissions:
+  contents: read
+
+jobs:
+  intel:
+    if: github.repository == 'HongXunPan/wxa-ci' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      PYTHONDONTWRITEBYTECODE: "1"
+      WXA_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: 检出公开执行外壳
+        # 复用项目已核定的官方 checkout v6 提交，不检出私有源码。
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: 外壳静态检查
+        run: /usr/bin/python3 scripts/check_static.py
+      - name: 受控获取源码
+        env:
+          WXA_SOURCE_READ_TOKEN: ${{ secrets.WXA_SOURCE_READ_TOKEN }}
+        run: /usr/bin/python3 scripts/fetch_source.py
+      - name: 编译、合成测试及最小交付
+        env:
+          WXA_DELIVERY_KIND: ${{ inputs.delivery_kind }}
+        run: /usr/bin/python3 scripts/run_build.py
+      - name: 暂存离线交付包
+        if: ${{ inputs.delivery_kind == 'offline' }}
+        # 只上传白名单交付目录，不上传源码、完整日志或测试结果包。
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: wxa-delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .codex-tmp/delivery/WeChatAssistant-demo-macos-x86_64.zip
+            .codex-tmp/delivery/WCDBSyntheticProbe-macos-x86_64.tgz
+            .codex-tmp/delivery/LiveFilesGuardProbe-macos-x86_64.tgz
+            .codex-tmp/delivery/manifest.json
+          # 祖先目录受管且隐藏；仍只枚举上述四个文件，不递归上传临时根。
+          include-hidden-files: true
+          archive: true
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: 暂存加密研究配套包
+        if: ${{ inputs.delivery_kind == 'research' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: wxa-delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .codex-tmp/delivery/research-bundle.zip.age
+            .codex-tmp/delivery/envelope.json
+          include-hidden-files: true
+          archive: true
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0

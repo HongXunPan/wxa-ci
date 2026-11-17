@@ -1,0 +1,13 @@
+# 本机文件和生成物不进入版本控制。
+/.codex-tmp/
+[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+*.log
+*.zip
+*.tgz
+*.key
+*.pem
