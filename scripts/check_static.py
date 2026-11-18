@@ -18,6 +18,7 @@ from ci_contract import (FILES, MAX_FILE, RESEARCH_ROLES, ROOT, delivery_files, 
                          inspect_app_archive, inspect_research_archive, require, unique_object, upload_files, validate_research_identity)
 from check_research_encryption import check_research_encryption
 from check_synthetic_query_report import check_synthetic_query_report
+from run_build import BuildProgress, NATIVE_STAGES, parse_native_stage
 from fetch_source import source_members
 
 CHECKOUT = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
@@ -221,6 +222,60 @@ def check_research_boundaries():
     return len(mutations) + len(checks) + app_archive_cases(require)
 
 
+def check_failure_stages():
+    """纯内存校验固定元数据；子命令全部替身，不读取报告或执行工具。"""
+    require(len(NATIVE_STAGES) == 87 and all(type(value) is int for value in NATIVE_STAGES),
+            "原生阶段白名单不符")
+    require(parse_native_stage(b"synthetic-private\nWXA_CI_STAGE_V1 300\nWXA_CI_STAGE_V1 308\n") == 308,
+            "固定阶段正向断言失败")
+    invalid = [b"", b"WXA_CI_STAGE_V1 308", b"WXA_CI_STAGE_V1 399\n",
+        b"WXA_CI_STAGE_V2 308\n", b"WXA_CI_STAGE_V1 308 raw\n", b"WXA_CI_STAGE_V1 308\r\n",
+        b"x" * (16 * 1024 + 1), b"WXA_CI_STAGE_V1 308\nWXA_CI_STAGE_V1 unknown\n"]
+    require(all(parse_native_stage(value) == 3 for value in invalid), "固定阶段拒绝断言失败")
+    progress = BuildProgress()
+    for stage in sorted(NATIVE_STAGES | set(range(1, 12))):
+        progress.enter(stage)
+        require(progress.failure_frame() == f"WXA_CI_FAILURE_V1 {stage:03d} 0", "阶段编码不符")
+    frames = [(True, 1, "000 1"), ("synthetic-private", 1, "000 1"), (308, True, "308 0"),
+              (308, 256, "308 0"), (308, -128, "308 0"), (308, -6, "308 -6")]
+    for stage, code, expected in frames:
+        progress.stage, progress.exit_code = stage, code
+        require(progress.failure_frame() == "WXA_CI_FAILURE_V1 " + expected, "编码泄漏未确认字段")
+    failed = subprocess.CompletedProcess(["synthetic-tool"], 134)
+    with patch("run_build.subprocess.run", return_value=failed) as invoked, patch("run_build.native_stage", return_value=308) as report:
+        try:
+            progress.run(3, ["synthetic-tool"], report="synthetic-report")
+        except ValueError:
+            pass
+        else:
+            raise ValueError("失败子命令未保留原门禁")
+        invoked.assert_called_once()
+        report.assert_called_once_with("synthetic-report")
+    require(progress.failure_frame() == "WXA_CI_FAILURE_V1 308 134", "未保留固定子步骤退出码")
+    with patch("run_build.subprocess.run", return_value=subprocess.CompletedProcess(["synthetic-tool"], 0)), patch("run_build.native_stage") as report:
+        progress.run(3, ["synthetic-tool"], report="synthetic-report")
+        require(not report.called and progress.failure_frame() == "WXA_CI_FAILURE_V1 003 0", "成功路径读取了失败报告")
+    for error in (ValueError("synthetic-private"), subprocess.TimeoutExpired("synthetic-tool", 1)):
+        with patch("run_build.subprocess.run", side_effect=error) as invoked:
+            try:
+                progress.run(2, ["synthetic-tool"])
+            except (ValueError, subprocess.TimeoutExpired):
+                pass
+            else:
+                raise ValueError("异常子命令未停止")
+            invoked.assert_called_once()
+        require(progress.failure_frame() == "WXA_CI_FAILURE_V1 002 0", "未知退出码不应伪造或公开异常")
+    build = (ROOT / "scripts/run_build.py").read_text()
+    require('source.read(16 * 1024 + 1)' in build and 'print(progress.failure_frame(), flush=True)' in build and
+            'raise SystemExit("构建或交付未完成；不上传原始日志，不自动重跑。") from None' in build,
+            "失败出口必须有界且保留原停止行为")
+    outputs = [node for node in ast.walk(ast.parse(build)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print"]
+    require(len(outputs) == 2 and all(isinstance(node.args[0], ast.Constant) or
+            isinstance(node.args[0], ast.Call) and isinstance(node.args[0].func, ast.Attribute) and
+            node.args[0].func.attr == "failure_frame" for node in outputs), "不能公开原始日志或异常")
+    return len(invalid) + len(frames) + 4
+
+
 def main():
     check_workflow()
     require(set(FILES) == {"WeChatAssistant-demo-macos-x86_64.zip", "WCDBSyntheticProbe-macos-x86_64.tgz",
@@ -250,10 +305,11 @@ def main():
     research_cases = check_research_boundaries()
     encryption_cases, configured = check_research_encryption()
     synthetic_cases = check_synthetic_query_report(ROOT)
+    failure_cases = check_failure_stages()
     print(json.dumps({"阶段": "公开外壳轻量静态检查", "通过": True, "检查文件数": len(paths),
                       "归档纯内存拒绝场景数": cases, "研究交付纯内存拒绝场景数": research_cases,
                       "加密配置拒绝场景数": encryption_cases, "研究公钥已配置": configured, "合成统计拒绝场景数": synthetic_cases,
-                      "读取私有源码": False, "执行编译": False}, ensure_ascii=False))
+                      "CI阶段纯内存场景数": failure_cases, "读取私有源码": False, "执行编译": False}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
