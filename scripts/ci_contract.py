@@ -1,9 +1,12 @@
 """公开执行外壳的固定身份和交付白名单，不接受任意项目或命令。"""
 import hashlib
 import os
+import plistlib
 import re
+import stat
 import tarfile
 import json
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +19,8 @@ FILES = (
     "LiveFilesGuardProbe-macos-x86_64.tgz",
 )
 RESEARCH_ROLES = {
+    "app": {"archive": "WeChatAssistant-demo-macos-x86_64.zip", "name": "WeChatAssistant",
+            "identifier": "io.github.hongxunpan.wechat-assistant.demo", "disable_library_validation": False},
     "research": {"archive": "WeChatAssistantResearch-macos-x86_64.tgz", "name": "WeChatAssistantResearch",
                  "identifier": "io.github.hongxunpan.wechat-assistant.research-sample",
                  "disable_library_validation": False},
@@ -70,7 +75,7 @@ def unique_object(pairs):
 
 def validate_research_identity(value):
     require(type(value) is dict and set(value) == {"schema", "roles", "bindings"} and
-            type(value["schema"]) is int and value["schema"] == 1, "研究身份格式不符")
+            type(value["schema"]) is int and value["schema"] == 2, "研究身份格式不符")
     roles = value["roles"]
     require(type(roles) is dict and set(roles) == set(RESEARCH_ROLES), "研究角色不符")
     fields = {"name", "identifier", "architecture", "size", "sha256", "cdhash", "hardened_runtime",
@@ -85,7 +90,7 @@ def validate_research_identity(value):
                 role["disable_library_validation"] is expected["disable_library_validation"], "研究角色身份不符")
     bindings = value["bindings"]
     require(type(bindings) is dict and set(bindings) == {"app_cdhash", "research_cdhash"} and
-            hex_digest(bindings["app_cdhash"], 40) and bindings["research_cdhash"] == roles["research"]["cdhash"],
+            bindings["app_cdhash"] == roles["app"]["cdhash"] and bindings["research_cdhash"] == roles["research"]["cdhash"],
             "读取器配套绑定不符")
     return value
 
@@ -104,35 +109,86 @@ def inspect_research_archive(archive, role):
             "研究归档摘要、数量或大小不符")
 
 
+def inspect_app_archive(archive, role):
+    """只读核验当前 App 固定布局与主程序，不解包、不把清单视为执行批准。"""
+    root = "WeChatAssistant.app/"
+    directories = {root, root + "Contents/", root + "Contents/MacOS/", root + "Contents/_CodeSignature/"}
+    programs = {"WeChatAssistant", "WeChatAssistantDemoReader", "WeChatAssistantIPCCheck", "WeChatAssistantIPCWorker"}
+    files = {root + "Contents/MacOS/" + name for name in programs} | {
+        root + "Contents/Info.plist", root + "Contents/PkgInfo", root + "Contents/_CodeSignature/CodeResources"}
+    entries = archive.infolist()
+    require(len(entries) == len(files | directories) and
+            {item.filename for item in entries} == files | directories, "App 归档成员缺失、重复或多出")
+    total = 0
+    for item in entries:
+        kind = stat.S_IFMT(item.external_attr >> 16)
+        directory = item.filename in directories
+        require(item.orig_filename == item.filename and item.is_dir() == directory and not item.flag_bits & 1 and
+                kind in ((0, stat.S_IFDIR) if directory else (0, stat.S_IFREG)) and
+                item.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) and
+                (item.file_size == 0 if directory else 0 < item.file_size <= MAX_FILE), "App 成员类型或大小不符")
+        total += item.file_size
+        require(total <= MAX_FILE, "App 展开总量超限")
+    info_path = root + "Contents/Info.plist"
+    require(archive.getinfo(info_path).file_size <= 16 * 1024, "App 属性表超限")
+    info = plistlib.loads(archive.read(info_path))
+    require(type(info) is dict and info.get("CFBundleIdentifier") == role["identifier"] and
+            info.get("CFBundleExecutable") == role["name"] and info.get("CFBundlePackageType") == "APPL",
+            "App 属性表与角色不符")
+    main = root + "Contents/MacOS/" + role["name"]
+    require(archive.getinfo(main).file_size == role["size"], "App 主程序大小不符")
+    value, count = hashlib.sha256(), 0
+    with archive.open(main) as source:
+        header = source.read(32)
+        require(len(header) == 32 and int.from_bytes(header[:4], "little") == 0xfeedfacf and
+                int.from_bytes(header[4:8], "little") == 0x1000007 and
+                int.from_bytes(header[12:16], "little") == 2, "App 主程序不是 Intel 可执行映像")
+        value.update(header); count += len(header)
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            value.update(block); count += len(block)
+            require(count <= role["size"], "App 主程序读取超限")
+    require(count == role["size"] and value.hexdigest() == role["sha256"], "App 主程序摘要不符")
+
+
+def inspect_research_payload(path, key, role):
+    # 原 TGZ 仍执行唯一普通成员校验；App ZIP 复用同一固定布局检查，不落地解包。
+    if key == "app":
+        with zipfile.ZipFile(path) as archive:
+            inspect_app_archive(archive, role)
+    else:
+        with tarfile.open(path, "r:gz") as archive:
+            inspect_research_archive(archive, role)
+
+
 def research_fields(build):
     path = build / "research-identity.json"
     require(path.is_file() and not path.is_symlink() and 0 < path.stat().st_size <= 8192, "研究身份文件不符")
     identity = validate_research_identity(json.loads(path.read_text(), object_pairs_hook=unique_object))
     for key, expected in RESEARCH_ROLES.items():
-        with tarfile.open(build / expected["archive"], "r:gz") as archive:
-            inspect_research_archive(archive, identity["roles"][key])
-    return {"schema": 2, "delivery": "research", "roles": identity["roles"], "bindings": identity["bindings"]}
+        inspect_research_payload(build / expected["archive"], key, identity["roles"][key])
+    return {"schema": 3, "delivery": "research", "roles": identity["roles"], "bindings": identity["bindings"]}
 
 
 def validate_research_manifest(value, source_sha, ci):
     require(type(value) is dict and set(value) == {"schema", "delivery", "source", "ci", "build", "files", "roles", "bindings"} and
-            type(value["schema"]) is int and value["schema"] == 2 and value["delivery"] == "research",
+            type(value["schema"]) is int and value["schema"] == 3 and value["delivery"] == "research",
             "研究内层清单格式不符")
     require(value["source"] == {"repository": SOURCE_REPOSITORY, "sha": source_sha, "ref": "refs/heads/main"} and
             type(value["ci"]) is dict and type(value["ci"].get("run_id")) is int and
             type(value["ci"].get("run_attempt")) is int and value["ci"] == ci, "研究内层构建身份不符")
-    validate_research_identity({"schema": 1, "roles": value["roles"], "bindings": value["bindings"]})
+    validate_research_identity({"schema": 2, "roles": value["roles"], "bindings": value["bindings"]})
     build = value["build"]
     require(type(build) is dict and set(build) == {"architecture", "deployment", "xcode", "tests"} and
             build["architecture"] == "x86_64" and build["deployment"] == "13.0" and build["tests"] == "passed" and
             type(build["xcode"]) is str and re.fullmatch(r"Xcode 16\.4\nBuild version [A-Za-z0-9]+", build["xcode"]),
             "研究内层工具链或测试结论不符")
     files = value["files"]
-    require(type(files) is list and len(files) == 2 and all(type(item) is dict and
+    require(type(files) is list and len(files) == 3 and all(type(item) is dict and
             set(item) == {"name", "size", "sha256"} and item["name"] in delivery_files("research") and
             type(item["size"]) is int and 0 < item["size"] <= MAX_FILE and hex_digest(item["sha256"], 64)
             for item in files) and {item["name"] for item in files} == set(delivery_files("research")),
             "研究内层交付描述不符")
+    require(sum(item["size"] for item in files) <= 2 * MAX_FILE, "研究内层文件总量超限")
     return value
 
 

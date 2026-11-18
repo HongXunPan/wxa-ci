@@ -12,7 +12,7 @@ import zipfile
 
 from ci_contract import (MAX_FILE, MAX_RESEARCH_CIPHER, MAX_RESEARCH_PLAIN, RESEARCH_CIPHER,
                          RESEARCH_ENVELOPE, RESEARCH_ROLES, ROOT, context, delivery_files, digest,
-                         inspect_research_archive, recipient_fingerprint, require, unique_object,
+                         inspect_research_payload, recipient_fingerprint, require, unique_object,
                          validate_research_manifest)
 
 VERSION = "v1.3.2"
@@ -124,8 +124,7 @@ def seal_research(payload, delivery, tools, recipient):
         state = regular(payload / item["name"], MAX_FILE)
         require(state.st_size == item["size"] and digest(payload / item["name"]) == item["sha256"], "研究内层文件字节不符")
     for role, expected in RESEARCH_ROLES.items():
-        with tarfile.open(payload / expected["archive"], "r:gz") as archive:
-            inspect_research_archive(archive, manifest["roles"][role])
+        inspect_research_payload(payload / expected["archive"], role, manifest["roles"][role])
     state = delivery.lstat()
     require(stat.S_ISDIR(state.st_mode) and state.st_uid == os.geteuid() and
             stat.S_IMODE(state.st_mode) == 0o700 and not any(delivery.iterdir()), "研究交付目录必须私有且为空")

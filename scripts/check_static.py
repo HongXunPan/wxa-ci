@@ -5,14 +5,17 @@ import hashlib
 import io
 import json
 import os
+import plistlib
 import re
+import stat
 import subprocess
 import sys
 import tarfile
+import zipfile
 from unittest.mock import patch
 
-from ci_contract import (FILES, RESEARCH_ROLES, ROOT, delivery_files, delivery_kind,
-                         inspect_research_archive, require, unique_object, upload_files, validate_research_identity)
+from ci_contract import (FILES, MAX_FILE, RESEARCH_ROLES, ROOT, delivery_files, delivery_kind,
+                         inspect_app_archive, inspect_research_archive, require, unique_object, upload_files, validate_research_identity)
 from check_research_encryption import check_research_encryption
 from check_synthetic_query_report import check_synthetic_query_report
 from fetch_source import source_members
@@ -98,23 +101,95 @@ def research_archive_fixture(role, name=None, member_type=tarfile.REGTYPE, extra
         inspect_research_archive(archive, role)
 
 
+def synthetic_app_archive(info=None, content=None):
+    """只生成不可执行的虚构头和内存 ZIP，不使用真实 App 或个人数据。"""
+    expected = RESEARCH_ROLES["app"]
+    if content is None:
+        content = b"".join(value.to_bytes(4, "little") for value in (0xfeedfacf, 0x1000007, 3, 2, 0, 0, 0, 0))
+        content += b"synthetic-app-not-executed"
+    role = {"name": expected["name"], "identifier": expected["identifier"], "architecture": "x86_64",
+        "size": len(content), "sha256": hashlib.sha256(content).hexdigest(), "cdhash": "e" * 40,
+        "hardened_runtime": True, "disable_library_validation": False}
+    root = "WeChatAssistant.app/"
+    files = {root + "Contents/MacOS/WeChatAssistant": content,
+        root + "Contents/Info.plist": plistlib.dumps(info if info is not None else {
+            "CFBundleIdentifier": expected["identifier"], "CFBundleExecutable": expected["name"], "CFBundlePackageType": "APPL"}),
+        root + "Contents/PkgInfo": b"APPL????", root + "Contents/_CodeSignature/CodeResources": b"synthetic-resource-not-signed"}
+    for name in ("WeChatAssistantDemoReader", "WeChatAssistantIPCCheck", "WeChatAssistantIPCWorker"):
+        files[root + "Contents/MacOS/" + name] = b"synthetic-tool-not-executed"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name in (root, root + "Contents/", root + "Contents/MacOS/", root + "Contents/_CodeSignature/"):
+            item = zipfile.ZipInfo(name); item.external_attr = (stat.S_IFDIR | 0o755) << 16
+            archive.writestr(item, b"")
+        for name, data in files.items():
+            item = zipfile.ZipInfo(name); item.external_attr = (stat.S_IFREG | 0o555) << 16
+            archive.writestr(item, data)
+    return buffer.getvalue(), role
+
+
+def app_archive_cases(require):
+    content, role = synthetic_app_archive()
+
+    def inspect(data=content, value=role, mutate=None):
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if mutate:
+                mutate(archive)
+            inspect_app_archive(archive, value)
+
+    inspect()
+    root = "WeChatAssistant.app/"
+    main = root + "Contents/MacOS/WeChatAssistant"
+    info = root + "Contents/Info.plist"
+    tool = root + "Contents/MacOS/WeChatAssistantDemoReader"
+    wrong_info, _ = synthetic_app_archive(info={"CFBundleIdentifier": "synthetic.invalid"})
+    wrong_code, wrong_role = synthetic_app_archive(content=b"synthetic-not-macho")
+    cases = [
+        lambda: inspect(value=dict(role, sha256="0" * 64)),
+        lambda: inspect(value=dict(role, size=role["size"] + 1)),
+        lambda: inspect(data=wrong_info), lambda: inspect(data=wrong_code, value=wrong_role),
+        lambda: inspect(mutate=lambda a: a.filelist.append(copy.copy(a.filelist[-1]))),
+        lambda: inspect(mutate=lambda a: a.filelist.pop()),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(main), "filename", "../outside")),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(main), "external_attr", (stat.S_IFLNK | 0o777) << 16)),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(root), "file_size", 1)),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(info), "file_size", 16 * 1024 + 1)),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(main), "file_size", MAX_FILE + 1)),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(tool), "file_size", MAX_FILE)),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(main), "orig_filename", main + "\\0")),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(main), "flag_bits", 1)),
+        lambda: inspect(mutate=lambda a: setattr(a.getinfo(main), "compress_type", zipfile.ZIP_BZIP2)),
+    ]
+    for case in cases:
+        try:
+            case()
+        except ValueError:
+            continue
+        raise ValueError("App 内存归档拒绝断言未生效")
+    return len(cases)
+
+
 def check_research_boundaries():
     content = b"synthetic-research-payload"
-    value = {"schema": 1, "roles": {key: {
+    value = {"schema": 2, "roles": {key: {
         "name": role["name"], "identifier": role["identifier"], "architecture": "x86_64", "size": len(content),
         "sha256": hashlib.sha256(content).hexdigest(), "cdhash": ("c" if key == "research" else "d") * 40,
         "hardened_runtime": True, "disable_library_validation": role["disable_library_validation"]}
         for key, role in RESEARCH_ROLES.items()},
         "bindings": {"app_cdhash": "e" * 40, "research_cdhash": "c" * 40}}
+    _, value["roles"]["app"] = synthetic_app_archive()
     require(validate_research_identity(value) == value, "研究身份正向断言失败")
-    for role in value["roles"].values():
-        research_archive_fixture(role)
+    for key, role in value["roles"].items():
+        if key != "app":
+            research_archive_fixture(role)
     mutations = [(('roles', 'other'), {}), (('roles', 'reader', 'name'), 'WeChatAssistantResearch'),
         (('roles', 'reader', 'identifier'), 'synthetic.invalid'), (('roles', 'reader', 'size'), True),
         (('roles', 'reader', 'architecture'), 'arm64'), (('roles', 'research', 'cdhash'), 'c' * 39),
         (('roles', 'reader', 'sha256'), 'z' * 64), (('roles', 'reader', 'hardened_runtime'), 1),
         (('roles', 'reader', 'disable_library_validation'), False), (('bindings', 'app_cdhash'), 'e' * 39),
-        (('bindings', 'research_cdhash'), 'e' * 40), (('raw_log',), 'synthetic')]
+        (('bindings', 'research_cdhash'), 'e' * 40), (('raw_log',), 'synthetic'),
+        (('schema',), 1), (('bindings', 'app_cdhash'), 'f' * 40),
+        (('roles', 'app', 'identifier'), 'synthetic.invalid'), (('roles', 'app', 'disable_library_validation'), True)]
     for path, replacement in mutations:
         changed = copy.deepcopy(value)
         parent = changed
@@ -131,7 +206,8 @@ def check_research_boundaries():
         lambda: research_archive_fixture(role, member_type=tarfile.SYMTYPE),
         lambda: research_archive_fixture(role, extra=True),
         lambda: research_archive_fixture(dict(role, sha256="0" * 64)),
-        lambda: delivery_files("latest"), lambda: unique_object([("schema", 1), ("schema", 2)])]
+        lambda: delivery_files("latest"), lambda: unique_object([("schema", 1), ("schema", 2)]),
+        lambda: validate_research_identity(dict(value, roles={key: role for key, role in value["roles"].items() if key != "app"}))]
     for check in checks:
         try:
             check()
@@ -142,7 +218,7 @@ def check_research_boundaries():
         require(delivery_kind() == "offline", "默认交付不能变为研究")
     with patch.dict(os.environ, {"WXA_DELIVERY_KIND": "research"}):
         require(delivery_kind() == "research", "显式研究档位未传递")
-    return len(mutations) + len(checks)
+    return len(mutations) + len(checks) + app_archive_cases(require)
 
 
 def main():
@@ -167,8 +243,9 @@ def main():
             '"scripts/check_static.py"' in build and '"scripts/ci-build.sh"' in build, "构建隔离或完整门禁缺失")
     require('for name in delivery_files(kind)' in build and 'manifest.update(research_fields(build))' in build and
             'if kind == "research":' in build and 'WXA_DELIVERY_KIND=kind' in build and
-            set(delivery_files("research")) == {"WeChatAssistantResearch-macos-x86_64.tgz", "SourceReaderCandidate-macos-x86_64.tgz"},
-            "研究配套必须共用完整构建并独立验证身份与归档，不混入离线包")
+            set(delivery_files("research")) == {"WeChatAssistant-demo-macos-x86_64.zip",
+                "WeChatAssistantResearch-macos-x86_64.tgz", "SourceReaderCandidate-macos-x86_64.tgz"},
+            "研究配套须含同次 App、研究端与读取器，不混入探针或其他候选")
     cases = check_archive_boundaries()
     research_cases = check_research_boundaries()
     encryption_cases, configured = check_research_encryption()

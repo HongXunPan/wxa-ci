@@ -35,6 +35,7 @@ def check_research_encryption():
             raise ValueError("空公钥未阻止研究发布")
     build = (ROOT / "scripts/run_build.py").read_text()
     crypto = (ROOT / "scripts/research_encryption.py").read_text()
+    contract = (ROOT / "scripts/ci_contract.py").read_text()
     ast.parse(crypto)
     require(build.index('recipient = configured_recipient()') < build.index('"scripts/ci-build.sh"') and
             'if kind == "research":\n        tools = prepare_tools(' in build and
@@ -46,7 +47,9 @@ def check_research_encryption():
     require(upload_files("research") == (RESEARCH_CIPHER, RESEARCH_ENVELOPE) and
             "urllib.request.urlopen(ASSET_URL, timeout=25)" in crypto and
             '"-e", "-r", recipient' in crypto and 'validate_research_manifest(manifest, source_sha, ci)' in crypto and
-            'inspect_research_archive(archive, manifest["roles"][role])' in crypto,
+            'inspect_research_payload(payload / expected["archive"], role, manifest["roles"][role])' in crypto and
+            'inspect_research_payload(build / expected["archive"], key, identity["roles"][key])' in contract and
+            'sum(item["size"] for item in files) <= 2 * MAX_FILE' in contract,
             "公开端只接公钥并核实内层，不得读取解密材料")
     strings = {node.value for node in ast.walk(ast.parse(crypto)) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
     require("passphrase.txt" not in strings and "identity.age" not in strings and
