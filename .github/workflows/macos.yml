@@ -16,6 +16,11 @@ run-name: 受控构建 · ${{ inputs.delivery_kind }} · ${{ inputs.source_sha }
         options:
           - offline
           - research
+      failure_diagnostic:
+        description: 仅研究失败时交付固定加密诊断，默认关闭
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,8 +47,10 @@ jobs:
           WXA_SOURCE_READ_TOKEN: ${{ secrets.WXA_SOURCE_READ_TOKEN }}
         run: /usr/bin/python3 scripts/fetch_source.py
       - name: 编译、合成测试及最小交付
+        id: build
         env:
           WXA_DELIVERY_KIND: ${{ inputs.delivery_kind }}
+          WXA_FAILURE_DIAGNOSTIC: ${{ inputs.failure_diagnostic }}
         run: /usr/bin/python3 scripts/run_build.py
       - name: 暂存离线交付包
         if: ${{ inputs.delivery_kind == 'offline' }}
@@ -57,6 +64,19 @@ jobs:
             .codex-tmp/delivery/LiveFilesGuardProbe-macos-x86_64.tgz
             .codex-tmp/delivery/manifest.json
           # 祖先目录受管且隐藏；仍只枚举上述四个文件，不递归上传临时根。
+          include-hidden-files: true
+          archive: true
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: 暂存加密失败诊断
+        if: ${{ failure() && steps.build.outcome == 'failure' && inputs.delivery_kind == 'research' && inputs.failure_diagnostic && steps.build.outputs.diagnostic_ready == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: wxa-failure-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .codex-tmp/failure-diagnostic/xctest.log.age
+            .codex-tmp/failure-diagnostic/diagnostic-envelope.json
           include-hidden-files: true
           archive: true
           if-no-files-found: error

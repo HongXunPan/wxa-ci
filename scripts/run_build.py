@@ -9,6 +9,7 @@ from ci_contract import (MAX_FILE, ROOT, SOURCE_REPOSITORY, context, delivery_fi
                          digest, require, research_fields)
 from research_encryption import configured_recipient, prepare_tools, seal_research
 from synthetic_query_report import collect_report, publish_report
+from failure_diagnostic import collect_failure, diagnostic_requested
 
 # 仅允许既有编排中的固定编号；含义由私有说明维护，不公开路径或命令。
 NATIVE_STAGES = frozenset((*range(100, 106), *range(110, 124), *range(130, 138),
@@ -78,6 +79,7 @@ def main(progress):
     os.umask(0o077)
     source_sha, ci = context()
     kind = delivery_kind()
+    diagnostic = diagnostic_requested(kind)
     require(not os.environ.get("WXA_SOURCE_READ_TOKEN"), "构建步骤不得接收源码凭证")
     recipient = configured_recipient() if kind == "research" else None
     source = ROOT / ".codex-tmp/source"
@@ -92,10 +94,14 @@ def main(progress):
                        WXA_SOURCE_REF="refs/heads/main", WXA_PRIVATE_REPORT=str(report), WXA_DELIVERY_KIND=kind)
     # 不改写 GitHub 内置身份变量；所有私有命令输出进入内部文件。
     commands = ((2, ["/usr/bin/python3", "scripts/check_static.py"]), (3, ["/bin/bash", "scripts/ci-build.sh"]))
-    with (private / "build.log").open("xb") as log:
-        for stage, command in commands:
-            progress.run(stage, command, report=report, cwd=source, env=environment, stdin=subprocess.DEVNULL,
-                         stdout=log, stderr=subprocess.STDOUT)
+    try:
+        with (private / "build.log").open("xb") as log:
+            for stage, command in commands:
+                progress.run(stage, command, report=report, cwd=source, env=environment, stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=subprocess.STDOUT)
+    except Exception:
+        collect_failure(progress, diagnostic, source, private, recipient)
+        raise
     progress.enter(4)
     statistics = collect_report(private / "build.log", (source / "Tests/CopyLocalTests.c").is_file())
     version = progress.run(5, ["/usr/bin/xcodebuild", "-version"], env=environment, stdin=subprocess.DEVNULL,

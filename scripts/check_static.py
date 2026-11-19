@@ -18,6 +18,7 @@ from ci_contract import (FILES, MAX_FILE, RESEARCH_ROLES, ROOT, delivery_files, 
                          inspect_app_archive, inspect_research_archive, require, unique_object, upload_files, validate_research_identity)
 from check_research_encryption import check_research_encryption
 from check_synthetic_query_report import check_synthetic_query_report
+from check_failure_diagnostic import check_failure_diagnostic
 from run_build import BuildProgress, NATIVE_STAGES, parse_native_stage
 from fetch_source import source_members
 
@@ -37,11 +38,13 @@ def check_workflow():
     require(set(value["on"]) == {"workflow_dispatch"} and
             value["permissions"] == {"contents": "read"} and set(value["jobs"]) == {"intel"}, "触发或权限范围不符")
     inputs = value["on"]["workflow_dispatch"]["inputs"]
-    require(set(inputs) == {"source_sha", "delivery_kind"} and inputs["source_sha"]["required"] is True and
+    require(set(inputs) == {"source_sha", "delivery_kind", "failure_diagnostic"} and inputs["source_sha"]["required"] is True and
             inputs["source_sha"]["type"] == "string", "不能接受任意仓库或命令输入")
     require(inputs["delivery_kind"]["required"] is True and inputs["delivery_kind"]["type"] == "choice" and
             inputs["delivery_kind"]["default"] == "offline" and
             inputs["delivery_kind"]["options"] == ["offline", "research"], "研究交付必须是显式固定档位")
+    require(inputs["failure_diagnostic"]["required"] is True and inputs["failure_diagnostic"]["type"] == "boolean" and
+            inputs["failure_diagnostic"]["default"] is False, "失败诊断必须显式开启且默认关闭")
     require(value["run-name"] == "受控构建 · ${{ inputs.delivery_kind }} · ${{ inputs.source_sha }}", "运行身份展示不符")
     job = value["jobs"]["intel"]
     require(job["if"] == "github.repository == 'HongXunPan/wxa-ci' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner" and
@@ -49,16 +52,17 @@ def check_workflow():
     require(job["env"] == {"DEVELOPER_DIR": "/Applications/Xcode_16.4.app/Contents/Developer",
             "PYTHONDONTWRITEBYTECODE": "1", "WXA_SOURCE_SHA": "${{ inputs.source_sha }}"}, "工具链或输入传递不符")
     steps = job["steps"]
-    require(len(steps) == 6 and steps[0]["uses"] == CHECKOUT and
+    require(len(steps) == 7 and steps[0]["uses"] == CHECKOUT and
             steps[0]["with"] == {"persist-credentials": False}, "公开外壳检出不符")
     for step, script in zip(steps[1:4], ("check_static.py", "fetch_source.py", "run_build.py")):
         require(step["run"] == "/usr/bin/python3 scripts/" + script and
                 not step.get("continue-on-error") and not step.get("if"), "受控执行入口或失败行为不符")
     require(steps[2]["env"] == {"WXA_SOURCE_READ_TOKEN": "${{ secrets.WXA_SOURCE_READ_TOKEN }}"} and
-            steps[3]["env"] == {"WXA_DELIVERY_KIND": "${{ inputs.delivery_kind }}"} and
-            all("env" not in steps[index] for index in (0, 1, 4, 5)) and
+            steps[3].get("id") == "build" and steps[3]["env"] == {"WXA_DELIVERY_KIND": "${{ inputs.delivery_kind }}",
+                "WXA_FAILURE_DIAGNOSTIC": "${{ inputs.failure_diagnostic }}"} and
+            all("env" not in steps[index] for index in (0, 1, 4, 5, 6)) and
             path.read_text().count("secrets.") == 1, "凭证只能交给源码获取步骤")
-    for index, kind in ((4, "offline"), (5, "research")):
+    for index, kind in ((4, "offline"), (6, "research")):
         require(steps[index]["uses"] == UPLOAD and steps[index]["with"] == {
             "name": "wxa-delivery-${{ github.run_id }}-${{ github.run_attempt }}",
             "path": "".join(".codex-tmp/delivery/" + name + "\n" for name in upload_files(kind)),
@@ -66,6 +70,13 @@ def check_workflow():
             "if-no-files-found": "error", "retention-days": 1, "compression-level": 0} and
             steps[index].get("if") == "${{ inputs.delivery_kind == '" + kind + "' }}" and
             not steps[index].get("continue-on-error"), "只能在成功后按显式档位上传一个固定附件")
+    require(steps[5]["uses"] == UPLOAD and steps[5].get("if") ==
+            "${{ failure() && steps.build.outcome == 'failure' && inputs.delivery_kind == 'research' && inputs.failure_diagnostic && steps.build.outputs.diagnostic_ready == 'true' }}" and
+            steps[5]["with"] == {"name": "wxa-failure-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}",
+                "path": ".codex-tmp/failure-diagnostic/xctest.log.age\n.codex-tmp/failure-diagnostic/diagnostic-envelope.json\n",
+                "archive": True, "include-hidden-files": True, "if-no-files-found": "error",
+                "retention-days": 1, "compression-level": 0} and not steps[5].get("continue-on-error"),
+            "失败诊断只能独立上传固定密文与封套，不能转绿或上传明文")
 
 
 def check_archive_boundaries():
@@ -306,10 +317,12 @@ def main():
     encryption_cases, configured = check_research_encryption()
     synthetic_cases = check_synthetic_query_report(ROOT)
     failure_cases = check_failure_stages()
+    diagnostic_cases = check_failure_diagnostic()
     print(json.dumps({"阶段": "公开外壳轻量静态检查", "通过": True, "检查文件数": len(paths),
                       "归档纯内存拒绝场景数": cases, "研究交付纯内存拒绝场景数": research_cases,
                       "加密配置拒绝场景数": encryption_cases, "研究公钥已配置": configured, "合成统计拒绝场景数": synthetic_cases,
-                      "CI阶段纯内存场景数": failure_cases, "读取私有源码": False, "执行编译": False}, ensure_ascii=False))
+                      "CI阶段纯内存场景数": failure_cases, "失败诊断纯内存场景数": diagnostic_cases,
+                      "读取私有源码": False, "执行编译": False}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
