@@ -129,11 +129,15 @@ def main(progress):
     if kind == "research":
         tools = prepare_tools(private / "age-tools")
         # 只在研究 CI 中运行一次性合成密钥用例，不获取父仓或真实解密材料。
-        with (private / "research-tests.log").open("xb") as log:
-            checked = progress.run(9, ["/usr/bin/python3", "Tests/ResearchDeliveryEncryptionTests.py",
-                "--age-tool-directory", str(tools)], cwd=source, env=environment,
-                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=180)
-            require(checked.returncode == 0, "研究加密合成测试未通过")
+        try:
+            with (private / "research-tests.log").open("xb") as log:
+                checked = progress.run(9, ["/usr/bin/python3", "Tests/ResearchDeliveryEncryptionTests.py",
+                    "--age-tool-directory", str(tools)], cwd=source, env=environment,
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=180)
+                require(checked.returncode == 0, "研究加密合成测试未通过")
+        except Exception:
+            collect_failure(progress, diagnostic, source, private, recipient)
+            raise
         progress.enter(10)
         seal_research(payload, delivery, tools, recipient)
     progress.enter(11)

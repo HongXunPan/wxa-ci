@@ -70,7 +70,7 @@ jobs:
           retention-days: 1
           compression-level: 0
       - name: 暂存加密失败诊断
-        if: ${{ failure() && steps.build.outcome == 'failure' && inputs.delivery_kind == 'research' && inputs.failure_diagnostic && steps.build.outputs.diagnostic_ready == 'true' }}
+        if: ${{ failure() && steps.build.outcome == 'failure' && inputs.delivery_kind == 'research' && inputs.failure_diagnostic && steps.build.outputs.diagnostic_ready == 'true' && steps.build.outputs.diagnostic_kind == 'xctest' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: wxa-failure-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
@@ -90,6 +90,19 @@ jobs:
           path: |
             .codex-tmp/delivery/research-bundle.zip.age
             .codex-tmp/delivery/envelope.json
+          include-hidden-files: true
+          archive: true
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: 暂存固定加密测试诊断
+        if: ${{ failure() && steps.build.outcome == 'failure' && inputs.delivery_kind == 'research' && inputs.failure_diagnostic && steps.build.outputs.diagnostic_ready == 'true' && steps.build.outputs.diagnostic_kind == 'research_crypto' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: wxa-failure-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .codex-tmp/failure-diagnostic/research-tests.json.age
+            .codex-tmp/failure-diagnostic/diagnostic-envelope.json
           include-hidden-files: true
           archive: true
           if-no-files-found: error

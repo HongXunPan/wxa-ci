@@ -18,7 +18,7 @@ from ci_contract import (FILES, MAX_FILE, RESEARCH_ROLES, ROOT, delivery_files, 
                          inspect_app_archive, inspect_research_archive, require, unique_object, upload_files, validate_research_identity)
 from check_research_encryption import check_research_encryption
 from check_synthetic_query_report import check_synthetic_query_report
-from check_failure_diagnostic import check_failure_diagnostic
+from check_failure_diagnostic import check_diagnostic_uploads, check_failure_diagnostic
 from run_build import BuildProgress, NATIVE_STAGES, parse_native_stage
 from fetch_source import source_members
 
@@ -52,7 +52,7 @@ def check_workflow():
     require(job["env"] == {"DEVELOPER_DIR": "/Applications/Xcode_16.4.app/Contents/Developer",
             "PYTHONDONTWRITEBYTECODE": "1", "WXA_SOURCE_SHA": "${{ inputs.source_sha }}"}, "工具链或输入传递不符")
     steps = job["steps"]
-    require(len(steps) == 7 and steps[0]["uses"] == CHECKOUT and
+    require(len(steps) == 8 and steps[0]["uses"] == CHECKOUT and
             steps[0]["with"] == {"persist-credentials": False}, "公开外壳检出不符")
     for step, script in zip(steps[1:4], ("check_static.py", "fetch_source.py", "run_build.py")):
         require(step["run"] == "/usr/bin/python3 scripts/" + script and
@@ -60,7 +60,7 @@ def check_workflow():
     require(steps[2]["env"] == {"WXA_SOURCE_READ_TOKEN": "${{ secrets.WXA_SOURCE_READ_TOKEN }}"} and
             steps[3].get("id") == "build" and steps[3]["env"] == {"WXA_DELIVERY_KIND": "${{ inputs.delivery_kind }}",
                 "WXA_FAILURE_DIAGNOSTIC": "${{ inputs.failure_diagnostic }}"} and
-            all("env" not in steps[index] for index in (0, 1, 4, 5, 6)) and
+            all("env" not in steps[index] for index in (0, 1, 4, 5, 6, 7)) and
             path.read_text().count("secrets.") == 1, "凭证只能交给源码获取步骤")
     for index, kind in ((4, "offline"), (6, "research")):
         require(steps[index]["uses"] == UPLOAD and steps[index]["with"] == {
@@ -70,13 +70,7 @@ def check_workflow():
             "if-no-files-found": "error", "retention-days": 1, "compression-level": 0} and
             steps[index].get("if") == "${{ inputs.delivery_kind == '" + kind + "' }}" and
             not steps[index].get("continue-on-error"), "只能在成功后按显式档位上传一个固定附件")
-    require(steps[5]["uses"] == UPLOAD and steps[5].get("if") ==
-            "${{ failure() && steps.build.outcome == 'failure' && inputs.delivery_kind == 'research' && inputs.failure_diagnostic && steps.build.outputs.diagnostic_ready == 'true' }}" and
-            steps[5]["with"] == {"name": "wxa-failure-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}",
-                "path": ".codex-tmp/failure-diagnostic/xctest.log.age\n.codex-tmp/failure-diagnostic/diagnostic-envelope.json\n",
-                "archive": True, "include-hidden-files": True, "if-no-files-found": "error",
-                "retention-days": 1, "compression-level": 0} and not steps[5].get("continue-on-error"),
-            "失败诊断只能独立上传固定密文与封套，不能转绿或上传明文")
+    check_diagnostic_uploads(steps, UPLOAD)
 
 
 def check_archive_boundaries():
