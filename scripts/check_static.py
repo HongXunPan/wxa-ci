@@ -275,9 +275,14 @@ def check_failure_stages():
             'raise SystemExit("构建或交付未完成；不上传原始日志，不自动重跑。") from None' in build,
             "失败出口必须有界且保留原停止行为")
     outputs = [node for node in ast.walk(ast.parse(build)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print"]
-    require(len(outputs) == 2 and all(isinstance(node.args[0], ast.Constant) or
+    require(len(outputs) == 3 and all(isinstance(node.args[0], ast.Constant) or
             isinstance(node.args[0], ast.Call) and isinstance(node.args[0].func, ast.Attribute) and
-            node.args[0].func.attr == "failure_frame" for node in outputs), "不能公开原始日志或异常")
+            node.args[0].func.attr == "failure_frame" or
+            isinstance(node.args[0], ast.Name) and node.args[0].id == "details" for node in outputs),
+            "不能增加未经确认的日志或异常出口")
+    require('details = tool_preparation_failure(progress, error)\n        if details is not None:\n            print(details, flush=True)' in build and
+            build.count('tool_preparation_failure(progress, error)') == 2,
+            "必要异常只能经过工具准备阶段格式化后输出")
     return len(invalid) + len(frames) + 4
 
 

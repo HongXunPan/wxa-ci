@@ -1,6 +1,8 @@
 """公开加密交付的纯数据与文本契约，不下载、不执行 age。"""
 import ast
 import json
+import subprocess
+import urllib.error
 from unittest.mock import patch
 
 from ci_contract import (RESEARCH_CIPHER, RESEARCH_ENVELOPE, ROOT, require, unique_object,
@@ -9,7 +11,50 @@ from research_encryption import (ASSET_SHA256, ASSET_SIZE, ASSET_URL, TOOL_HASHE
                                  configured_recipient, parse_recipient_config)
 
 
+def check_tool_preparation_failure():
+    """只用虚构异常验证单行输出，不联网、不执行工具或读取真实诊断。"""
+    from run_build import BuildProgress, tool_preparation_failure
+
+    class UnreadableError(Exception):
+        def __str__(self):
+            raise AssertionError("非工具准备阶段不得读取异常原文")
+
+    progress = BuildProgress()
+    stages = (0, 1, 7, 9, 130, True, "8")
+    for stage in stages:
+        progress.stage = stage
+        require(tool_preparation_failure(progress, UnreadableError()) is None,
+                "其他阶段不能输出或读取异常")
+    progress.enter(8)
+    prefix = "研究工具准备失败："
+    cases = [
+        (ValueError("synthetic archive digest mismatch"), "synthetic archive digest mismatch"),
+        (urllib.error.HTTPError("https://example.invalid/tool?signature=synthetic", 503,
+                               "Service Unavailable", None, None), "HTTP Error 503: Service Unavailable"),
+        (urllib.error.URLError("synthetic TLS verification failed"),
+         "<urlopen error synthetic TLS verification failed>"),
+        (OSError(13, "synthetic permission denied", "synthetic-tool"),
+         "[Errno 13] synthetic permission denied: 'synthetic-tool'"),
+        (subprocess.TimeoutExpired(["synthetic-tool", "--version"], 10,
+                                   output=b"synthetic-output-not-for-display"),
+         "Command '['synthetic-tool', '--version']' timed out after 10 seconds"),
+        (ValueError("prefix HTTPS://example.invalid/tool?signature=synthetic#fragment suffix\n::error::synthetic"),
+         "prefix <下载地址已省略> suffix\n::error::synthetic"),
+        (ValueError("x" * 2048), "x" * 1024),
+    ]
+    for error, expected in cases:
+        detail = tool_preparation_failure(progress, error)
+        require(detail.startswith(prefix) and "\n" not in detail and "\r" not in detail and
+                len(detail.encode("utf-8")) < 8 * 1024, "错误说明必须是有界单行")
+        value = json.loads(detail[len(prefix):])
+        require(value == {"exception": type(error).__name__, "message": expected} and
+                "signature=synthetic" not in detail and "synthetic-output-not-for-display" not in detail,
+                "必要错误被改变或输出了下载链接及工具输出")
+    return len(stages) + len(cases)
+
+
 def check_research_encryption():
+    require(check_tool_preparation_failure() == 14, "工具准备错误纯内存场景未完整运行")
     config = ROOT / "config/research-recipient.json"
     value = json.loads(config.read_text(), object_pairs_hook=unique_object)
     selected = parse_recipient_config(value)

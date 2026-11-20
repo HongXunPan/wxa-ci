@@ -63,6 +63,15 @@ class BuildProgress:
         return f"WXA_CI_FAILURE_V1 {stage:03d} {code}"
 
 
+def tool_preparation_failure(progress, error):
+    """只展示公开工具准备的必要异常，不转储日志、环境或临时下载链接。"""
+    if type(progress.stage) is not int or progress.stage != 8:
+        return None
+    message = re.sub(r"https?://\S+", "<下载地址已省略>", str(error), flags=re.IGNORECASE)
+    return "研究工具准备失败：" + json.dumps({"exception": type(error).__name__,
+        "message": message[:1024]}, ensure_ascii=True)
+
+
 def copy_delivery(build, payload, kind):
     files = []
     for name in delivery_files(kind):
@@ -149,6 +158,9 @@ if __name__ == "__main__":
     progress = BuildProgress()
     try:
         main(progress)
-    except Exception:
+    except Exception as error:
         print(progress.failure_frame(), flush=True)
+        details = tool_preparation_failure(progress, error)
+        if details is not None:
+            print(details, flush=True)
         raise SystemExit("构建或交付未完成；不上传原始日志，不自动重跑。") from None
