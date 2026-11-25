@@ -19,6 +19,7 @@ from ci_contract import (FILES, MAX_FILE, RESEARCH_ROLES, ROOT, delivery_files, 
 from check_research_encryption import check_research_encryption
 from check_synthetic_query_report import check_synthetic_query_report
 from check_failure_diagnostic import check_diagnostic_uploads, check_failure_diagnostic
+from check_native_failure_details import check_native_failure_details
 from run_build import BuildProgress, NATIVE_STAGES, parse_native_stage
 from fetch_source import source_members
 
@@ -317,10 +318,12 @@ def main():
     synthetic_cases = check_synthetic_query_report(ROOT)
     failure_cases = check_failure_stages()
     diagnostic_cases = check_failure_diagnostic()
+    native_detail_cases = check_native_failure_details(ROOT)
     print(json.dumps({"阶段": "公开外壳轻量静态检查", "通过": True, "检查文件数": len(paths),
                       "归档纯内存拒绝场景数": cases, "研究交付纯内存拒绝场景数": research_cases,
                       "加密配置拒绝场景数": encryption_cases, "研究公钥已配置": configured, "合成统计拒绝场景数": synthetic_cases,
                       "CI阶段纯内存场景数": failure_cases, "失败诊断纯内存场景数": diagnostic_cases,
+                      "原生必要错误纯内存场景数": native_detail_cases,
                       "读取私有源码": False, "执行编译": False}, ensure_ascii=False))
 
 
