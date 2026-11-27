@@ -6,6 +6,57 @@ from ci_contract import require
 from native_failure_details import (MAX_LOG, MAX_OUTPUT, PREFIX, emit_native_failure_details,
                                     parse_native_details)
 
+CHILD_ERROR = "RuntimeError: WXA_SYNTHETIC_CHILD_V1 "
+
+
+def _child_trace(message, location="Tests/sample.py"):
+    return (f'Traceback (most recent call last):\n  File "/synthetic/source/{location}", line 8, in main\n'
+            + message + "\n").encode("utf-8")
+
+
+def _child_acceptance_cases():
+    count = 0
+    for case in range(3):
+        for code in [-127, -14, -11, -9, -6, -1, 1, 127, 255]:
+            message = f"{CHILD_ERROR}{case} {code} empty -"
+            value = parse_native_details(_child_trace(message))
+            require(value["available"] and value["errors"][-1] ==
+                    {"kind": "python-exception", "file": None, "line": None, "column": None, "message": message},
+                    "合成退出值不得丢失正负号或改变既有错误字段")
+            count += 1
+    cases = [("firstline", "x" * 512, "x" * 512), ("firstline", "合成错误" * 32, "合成错误" * 32),
+             ("firstline", "see https://synthetic.invalid/file?q=1 now", "see <URL> now"),
+             ("firstline", "-", "-"), ("oversize", "-", "-"), ("nontext", "-", "-"), ("sensitive", "-", "-")]
+    for state, detail, expected in cases:
+        value = parse_native_details(_child_trace(f"{CHILD_ERROR}0 -6 {state} {detail}"))
+        require(value["errors"][-1]["message"] == f"{CHILD_ERROR}0 -6 {state} {expected}",
+                "仅允许有界必要首行，URL必须省略，其他分类不能携带内容")
+    ordinary = parse_native_details(_child_trace("RuntimeError: synthetic-private"))
+    require(ordinary["errors"][-1]["message"] == "RuntimeError", "未标记异常仍只输出原固定类别")
+    return count + len(cases) + 1
+
+
+def _child_rejection_cases():
+    values = ["3 -6 empty -", "-1 -6 empty -", "0 0 empty -", "0 -0 empty -", "0 +1 empty -",
+              "0 01 empty -", "0 -01 empty -", "0 -128 empty -", "0 256 empty -", "0 1.0 empty -",
+              "0 True empty -", "0 -6 unknown -", "0 -6 empty leaked", "0 -6 firstline ",
+              "0 -6 firstline   ", "0 -6 firstline " + "x" * 513, "0 -6 firstline " + "合" * 171,
+              "0 -6 firstline token=synthetic-private", "0 -6 firstline Authorization: Bearer synthetic",
+              "0 -6 firstline bad\x00line"]
+    invalid = [_child_trace(CHILD_ERROR + value) for value in values]
+    message = CHILD_ERROR + "0 -6 empty -"
+    invalid += [message.encode() + b"\n", _child_trace(message, "scripts/sample.py"),
+                _child_trace("RuntimeError: synthetic-private") + message.encode() + b"\n",
+                _child_trace("Traceback (most recent call last):\n" + message),
+                _child_trace(CHILD_ERROR + "0 -6 firstline " + '"' * 512) * 8]
+    for raw in invalid:
+        try:
+            parse_native_details(raw)
+        except (ValueError, UnicodeError):
+            continue
+        raise ValueError("合成退出消息的范围、上下文或容量拒绝未生效")
+    return len(invalid)
+
 
 def _parsing_cases():
     import json
@@ -89,4 +140,4 @@ def _wiring(root):
 
 
 def check_native_failure_details(root):
-    return _parsing_cases() + _emission_cases() + _wiring(root)
+    return _parsing_cases() + _emission_cases() + _wiring(root) + _child_acceptance_cases() + _child_rejection_cases()

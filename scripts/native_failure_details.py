@@ -14,6 +14,9 @@ ASSERTION = re.compile(r"Assertion failed: \((.+)\), function [^,\r\n]+, file (.
 PYTHON = re.compile(r'\s*File "([^"]+\.py)", line ([1-9][0-9]{0,6}), in [A-Za-z_<>][A-Za-z_0-9.<>]*')
 PYTHON_ERRORS = frozenset(("AssertionError", "ValueError", "TypeError", "RuntimeError", "OSError",
                           "TimeoutError", "PermissionError"))
+CHILD_MARKER = "RuntimeError: WXA_SYNTHETIC_CHILD_V1"
+CHILD = re.compile(r"RuntimeError: WXA_SYNTHETIC_CHILD_V1 ([0-2]) (-?[1-9][0-9]{0,2}) "
+                   r"(empty|firstline|oversize|nontext|sensitive) (.+)")
 SENSITIVE = re.compile(r"gh[pousr]_|github_pat_|AGE-SECRET-KEY-|authorization\s*:|bearer\s+\S+|"
                        r"(?:token|passphrase|password|private[_ -]?key)\s*[=:]", re.IGNORECASE)
 
@@ -37,7 +40,22 @@ def _message(value):
     return value
 
 
-def _record(line):
+def _child_exit(line):
+    match = CHILD.fullmatch(line)
+    if not match or not -127 <= int(match[2]) <= 255:
+        raise ValueError("合成退出消息字段无效")
+    case, code, state, detail = match[1], int(match[2]), match[3], match[4]
+    if state == "firstline":
+        if not (0 < len(detail.encode("utf-8")) <= 512 and detail.isprintable() and
+                not detail.isspace() and not SENSITIVE.search(detail)):
+            raise ValueError("必要首行不可公开")
+        detail = re.sub(r"https?://\S+", "<URL>", detail, flags=re.IGNORECASE)
+    elif detail != "-":
+        raise ValueError("分类消息不得夹带错误内容")
+    return _message(f"{CHILD_MARKER} {case} {code} {state} {detail}")
+
+
+def _record(line, allow_child=False):
     if match := COMPILER.fullmatch(line):
         return {"kind": "compiler-error", "file": _source_file(match[1]), "line": int(match[2]),
                 "column": int(match[3]) if match[3] else None, "message": _message(match[4])}
@@ -47,6 +65,11 @@ def _record(line):
     if match := PYTHON.fullmatch(line):
         return {"kind": "python-location", "file": _source_file(match[1]), "line": int(match[2]),
                 "column": None, "message": None}
+    if line.startswith(CHILD_MARKER):
+        if not allow_child:
+            raise ValueError("合成退出消息缺少测试回溯上下文")
+        return {"kind": "python-exception", "file": None, "line": None, "column": None,
+                "message": _child_exit(line)}
     name = line.split(":", 1)[0]
     if name in PYTHON_ERRORS:
         return {"kind": "python-exception", "file": None, "line": None, "column": None, "message": name}
@@ -66,16 +89,21 @@ def parse_native_details(raw):
     if type(raw) is not bytes or len(raw) > MAX_LOG:
         raise ValueError("必要错误输入超限或类型未知")
     result = _empty("no_match")
+    last_python_file = None
     for line in raw.decode("utf-8").splitlines():
+        if line == "Traceback (most recent call last):":
+            last_python_file = None
+            continue
         if line.startswith("WXA_NATIVE_CASE_V1"):
             match = CASE.fullmatch(line)
             if not match or int(match[1]) > 23:
                 raise ValueError("合成用例编号无效")
             result["last_case"] = int(match[1])
             continue
-        record = _record(line)
+        record = _record(line, bool(last_python_file and last_python_file.startswith("Tests/")))
         if record is not None:
             result["errors"].append(record)
+            last_python_file = record["file"] if record["kind"] == "python-location" else None
             if len(result["errors"]) > MAX_RECORDS:
                 raise ValueError("必要错误条数超限")
     if result["errors"]:
